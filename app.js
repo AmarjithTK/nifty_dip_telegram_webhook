@@ -42,7 +42,31 @@ class Notifier {
   }
 }
 
-// class TelegramNotifier extends Notifier { ... } // commented out
+class TelegramNotifier extends Notifier {
+  constructor(botToken, chatId) {
+    super();
+    this.botToken = botToken;
+    this.chatId = chatId;
+  }
+
+  async notify(message) {
+    if (!this.botToken || !this.chatId) {
+      return { ok: false, error: "Missing Telegram credentials" };
+    }
+    try {
+      const url = `https://api.telegram.org/bot${this.botToken}/sendMessage`;
+      const payload = {
+        chat_id: this.chatId,
+        text: message,
+        parse_mode: "Markdown",
+      };
+      const { data } = await axios.post(url, payload, { timeout: 10000 });
+      return { ok: true, telegram: data };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
+}
 
 class ConsoleNotifier extends Notifier {
   async notify(message) {
@@ -101,7 +125,9 @@ function pctChange(latest, prior) {
   return ((latest - prior) / prior) * 100;
 }
 
-async function checkWatchlist(notifier = new ConsoleNotifier()) {
+let lastDips = []; // Store last dips for /get endpoint
+
+async function checkWatchlist(notifier = new ConsoleNotifier(), skipNotify = false) {
   const nowIST = DateTime.now().setZone("Asia/Kolkata");
   if (!isWithinTradingAlertWindow(nowIST)) {
     return { ok: false, message: "Outside alert window", dips: [] };
@@ -122,7 +148,16 @@ async function checkWatchlist(notifier = new ConsoleNotifier()) {
           `${item.name} (${item.symbol}) is ${change.toFixed(2)}% vs prev close.\n` +
           `Price: ₹${quote.price.toFixed(2)} | Prev: ₹${quote.prevClose.toFixed(2)}\n` +
           `(${nowIST.toFormat("dd LLL yyyy HH:mm")} IST)`;
-        await notifier.notify(msg);
+
+        let telegramResponse = null;
+        if (!skipNotify) {
+          await notifier.notify(msg);
+          if (process.env.TG_BOT_TOKEN && process.env.TG_CHAT_ID) {
+            const tgNotifier = new TelegramNotifier(process.env.TG_BOT_TOKEN, process.env.TG_CHAT_ID);
+            telegramResponse = await tgNotifier.notify(msg);
+          }
+        }
+
         dips.push({
           name: item.name,
           symbol: item.symbol,
@@ -130,29 +165,50 @@ async function checkWatchlist(notifier = new ConsoleNotifier()) {
           prevClose: quote.prevClose,
           change: Number(change.toFixed(2)),
           time: nowIST.toISO(),
+          telegram: telegramResponse, // Only here, not in /get
         });
-        // To enable Telegram, uncomment and use TelegramNotifier
-        // await new TelegramNotifier(process.env.TG_BOT_TOKEN, process.env.TG_CHAT_ID).notify(msg);
       }
     } catch (e) {
       // Optionally log error
     }
   }
+  lastDips = dips.map(d => {
+    // Remove telegram field for /get endpoint
+    const { telegram, ...rest } = d;
+    return rest;
+  });
   return { ok: true, dips };
 }
 
 // Vercel/Express compatible handler
 async function handler(req, res) {
   // For Vercel, req/res are provided; for Express, same signature
+  if (req.url === "/get" && req.method === "GET") {
+    // Return last dips in JSON, no Telegram response
+    res.setHeader("Content-Type", "application/json");
+    res.status(200).json({ ok: true, dips: lastDips });
+    return;
+  }
   const result = await checkWatchlist();
+  // Remove telegram field from dips for main response, but keep it in a subfield if present
+  const dips = result.dips.map(d => {
+    const { telegram, ...rest } = d;
+    return rest;
+  });
+  const telegramResponses = result.dips.map(d => d.telegram).filter(Boolean);
   res.setHeader("Content-Type", "application/json");
-  res.status(200).json(result);
+  res.status(200).json({
+    ok: result.ok,
+    dips,
+    telegram: telegramResponses.length ? telegramResponses : undefined,
+  });
 }
+checkWatchlist()
 
 // For Vercel: export as default
 module.exports = handler;
 
 // For local/CLI testing, uncomment below:
-// if (require.main === module) {
-//   checkWatchlist().then(console.log);
-// }
+if (require.main === module) {
+  checkWatchlist().then(console.log);
+}
