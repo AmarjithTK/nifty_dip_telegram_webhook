@@ -182,15 +182,22 @@ async function checkWatchlist(notifier = new ConsoleNotifier(), skipNotify = fal
 
 // Vercel/Express compatible handler
 async function handler(req, res) {
-  // For Vercel, req/res are provided; for Express, same signature
-  if (req.url === "/get" && req.method === "GET") {
-    // Return last dips in JSON, no Telegram response
+  // Normalize path for Vercel/Express
+  const url = req.url || req.originalUrl || "";
+  const method = req.method || "GET";
+  // Support /api/filename or /api/filename/get or ?get=1
+  const isGetEndpoint =
+    url.endsWith("/get") ||
+    (req.query && req.query.get !== undefined) ||
+    (url.includes("?get") && method === "GET");
+
+  if (isGetEndpoint) {
     res.setHeader("Content-Type", "application/json");
     res.status(200).json({ ok: true, dips: lastDips });
     return;
   }
+
   const result = await checkWatchlist();
-  // Remove telegram field from dips for main response, but keep it in a subfield if present
   const dips = result.dips.map(d => {
     const { telegram, ...rest } = d;
     return rest;
@@ -203,12 +210,8 @@ async function handler(req, res) {
     telegram: telegramResponses.length ? telegramResponses : undefined,
   });
 }
-checkWatchlist()
 
 // For Vercel: export as default
 module.exports = handler;
 
-// For local/CLI testing, uncomment below:
-if (require.main === module) {
-  checkWatchlist().then(console.log);
-}
+
